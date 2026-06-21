@@ -1,0 +1,22 @@
+services:
+  cliente-db:
+    image: postgres:16-alpine
+    container_name: cliente-db
+    environment:
+      POSTGRES_DB: cliente_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST_AUTH_METHOD: md5
+    ports:
+      - "5434:5432"
+    volumes:
+      - cliente-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cliente_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  cliente-db-data:
