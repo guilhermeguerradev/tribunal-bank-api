@@ -15,97 +15,157 @@ import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 
 // ═══════════════════════════════════════════════════════════
-// JWT CONFIG — Configuração exclusiva das chaves RSA e JWT
+// JWT CONFIG — Configuração dos beans de codificação JWT
 // ═══════════════════════════════════════════════════════════
 //
-// RESPONSABILIDADE ÚNICA (Single Responsibility Principle):
-// Essa classe cuida APENAS de configurar como o JWT é
-// gerado e verificado usando as chaves RSA do .env
+// RESPONSABILIDADE ÚNICA (SRP):
+// Essa classe tem UMA responsabilidade:
+// configurar e expor como beans Spring os componentes
+// necessários para GERAR e VERIFICAR tokens JWT.
 //
-// Por que separar do SecurityConfig?
-// SecurityConfig define REGRAS DE ACESSO (quem pode o quê)
-// JwtConfig define COMO O TOKEN FUNCIONA (geração e verificação)
-// São responsabilidades diferentes — manutenção mais fácil
+// O que NÃO é responsabilidade dessa classe:
+// → Converter chaves PEM → responsabilidade do PemKeyParser
+// → Definir regras de acesso → responsabilidade do SecurityConfig
+// → Gerar o conteúdo do token → responsabilidade do JwtService
 //
-// FLUXO DO JWT:
+// ASSIMETRIA RSA — conceito fundamental:
 //
-// LOGIN:
-// AuthService gera token
-//      ↓
-// JwtEncoder assina com CHAVE PRIVADA
-//      ↓
-// Token enviado ao cliente
+// RSA usa um PAR de chaves matematicamente relacionadas:
 //
-// REQUISIÇÃO AUTENTICADA:
-// Cliente manda token no header
-//      ↓
-// Spring Security intercepta
-//      ↓
-// JwtDecoder verifica com CHAVE PÚBLICA
-//      ↓
-// Requisição autorizada ou rejeitada
+//   CHAVE PRIVADA (secreta — só o Auth Service tem)
+//   → Usada para ASSINAR o token no login
+//   → Matemáticamente é impossível derivar a privada a partir da pública
+//   → NUNCA sai do Auth Service, nunca vai para outros microsserviços
+//
+//   CHAVE PÚBLICA (pode ser compartilhada)
+//   → Usada para VERIFICAR a assinatura do token
+//   → Qualquer microsserviço pode ter uma cópia para validar tokens
+//   → Na V2 do projeto: Cliente Service, Conta Service etc
+//      receberão a chave pública para validar tokens sem chamar o Auth
+//
+// VANTAGEM DO RSA SOBRE HMAC (HS256):
+// Com HMAC, todos os serviços precisariam da MESMA chave secreta
+// para verificar tokens — o que aumenta o risco de vazamento.
+// Com RSA, apenas o Auth Service tem a chave privada.
+// Os outros serviços têm só a pública — inútil para gerar tokens falsos.
+//
+// NIMBUS JOSE JWT:
+// Biblioteca Java líder para JWT/JWE/JWS (RFC 7515, 7516, 7519).
+// O Spring Security OAuth2 Resource Server usa ela internamente.
+// NimbusJwtDecoder e NimbusJwtEncoder são wrappers do Spring sobre Nimbus.
+//
+// @Configuration — indica ao Spring que essa classe contém definições de beans.
+// Todos os métodos @Bean são gerenciados pelo container IoC.
 // ═══════════════════════════════════════════════════════════
 @Configuration
 public class JwtConfig {
 
-    // Chave pública lida do .env via application.properties
-    // jwt.public-key=${JWT_PUBLIC_KEY}
+    // ═══════════════════════════════════════════════════════
+    // INJEÇÃO DAS CHAVES VIA @Value
+    // ═══════════════════════════════════════════════════════
     //
-    // Usada para VERIFICAR tokens — qualquer serviço pode ter
-    // Na V2 os outros microsserviços terão uma cópia da chave pública
+    // @Value("${jwt.public-key}") lê a propriedade jwt.public-key
+    // do application-dev.properties (ou da variável de ambiente).
+    //
+    // Por que String e não RSAPublicKey diretamente?
+    // O Spring consegue injetar RSAPublicKey diretamente SE a chave
+    // estiver em um arquivo .pem referenciado por classpath:chave.pem.
+    // No nosso caso a chave está como texto no properties com \n literal —
+    // o conversor padrão do Spring não trata isso.
+    // Solução: injetar como String e fazer o parse via PemKeyParser.
+    //
+    // Por que as chaves ficam em properties e não hardcoded?
+    // → Em dev: properties carrega do application-dev.properties (gitignored)
+    // → Em prod: variável de ambiente sobrescreve o properties
+    // → Nunca vai para o repositório Git com as chaves reais
     @Value("${jwt.public-key}")
-    private RSAPublicKey publicKey;
+    private String publicKeyValue;
 
-    // Chave privada lida do .env via application.properties
-    // jwt.private-key=${JWT_PRIVATE_KEY}
-    //
-    // Usada para ASSINAR tokens — só o Auth Service tem
-    // NUNCA compartilhar com outros serviços
     @Value("${jwt.private-key}")
-    private RSAPrivateKey privateKey;
+    private String privateKeyValue;
 
     // ═══════════════════════════════════════════════════════
-    // JWT DECODER — Verifica tokens recebidos nas requisições
+    // JWT DECODER — Bean de verificação de tokens recebidos
     // ═══════════════════════════════════════════════════════
     //
-    // O Spring Security usa esse bean automaticamente para
-    // validar o Bearer token em toda requisição autenticada
+    // O Spring Security usa esse bean automaticamente para validar
+    // o Bearer token em TODA requisição autenticada.
+    // Você não chama esse bean manualmente — o framework chama.
     //
-    // Verificações que ele faz:
-    // → Assinatura válida? (foi assinado com nossa chave privada?)
-    // → Token não expirou? (exp > agora)
-    // → Token não foi adulterado? (payload intacto)
+    // FLUXO AUTOMÁTICO DO SPRING SECURITY:
+    // Requisição chega com header: Authorization: Bearer eyJhbG...
+    //      ↓
+    // BearerTokenAuthenticationFilter extrai o token
+    //      ↓
+    // JwtDecoder.decode(token) verifica:
+    //   → Assinatura válida? (foi assinado com nossa chave privada?)
+    //   → Token não expirou? (claim "exp" > agora)
+    //   → Token não foi adulterado? (payload intacto)
+    //      ↓
+    // Autenticação bem-sucedida → request prossegue para o Controller
+    // Autenticação falha        → 401 Unauthorized automático
     //
-    // Se qualquer verificação falhar → 401 Unauthorized automático
+    // NimbusJwtDecoder.withPublicKey():
+    // Cria um decoder que verifica assinaturas usando chave pública RSA.
+    // Algoritmo padrão: RS256 (RSA + SHA-256).
+    //
+    // throws Exception:
+    // O parse da chave pode falhar se o PEM for inválido.
+    // Preferível falhar na inicialização do Spring a falhar em produção.
+    // Spring vai abortar o startup com mensagem clara — comportamento correto.
     @Bean
-    public JwtDecoder jwtDecoder() {
+    public JwtDecoder jwtDecoder() throws Exception {
+        RSAPublicKey publicKey = PemKeyParser.parsePublicKey(publicKeyValue);
+
         return NimbusJwtDecoder
-                .withPublicKey(publicKey)
+                .withPublicKey(publicKey)  // verifica com chave pública
                 .build();
     }
 
     // ═══════════════════════════════════════════════════════
-    // JWT ENCODER — Gera e assina tokens no login
+    // JWT ENCODER — Bean de geração e assinatura de tokens
     // ═══════════════════════════════════════════════════════
     //
-    // Usado pelo JwtService para gerar o access token após login
+    // Usado pelo JwtService para gerar access tokens após login bem-sucedido.
+    // Você INJETA esse bean no JwtService via @Autowired ou construtor.
     //
-    // JWKSet → conjunto de chaves no formato JSON Web Key
-    //          padrão da especificação OAuth2/OIDC
-    //          permite múltiplas chaves para rotação futura
+    // FLUXO DE GERAÇÃO:
+    // JwtService recebe o usuário autenticado
+    //      ↓
+    // Monta os claims: sub (email), roles, exp (expiração), iat (emissão)
+    //      ↓
+    // JwtEncoder.encode(claims) assina com CHAVE PRIVADA
+    //      ↓
+    // Retorna token: eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ...
     //
-    // RSAKey → representa o par RSA (pública + privada) em formato JWK
-    //          o encoder usa a PRIVADA para assinar
-    //          o decoder usa a PÚBLICA para verificar
+    // JWKSet (JSON Web Key Set):
+    // Estrutura padrão RFC 7517 para representar chaves criptográficas.
+    // Permite múltiplas chaves — útil para rotação de chaves em produção:
+    // você adiciona uma nova chave sem invalidar tokens com a chave antiga.
     //
-    // ImmutableJWKSet → conjunto imutável de chaves
-    //                   thread-safe por padrão
+    // RSAKey.Builder:
+    // Constrói a representação JWK do par RSA.
+    // Inclui a chave pública (para publicar no endpoint /.well-known/jwks.json)
+    // e a privada (para assinar — nunca exposta externamente).
+    //
+    // ImmutableJWKSet:
+    // Conjunto imutável e thread-safe de chaves JWK.
+    // Thread-safe é crítico porque o encoder é um bean singleton
+    // compartilhado entre todas as threads da aplicação.
     @Bean
-    public JwtEncoder jwtEncoder() {
+    public JwtEncoder jwtEncoder() throws Exception {
+        RSAPublicKey publicKey   = PemKeyParser.parsePublicKey(publicKeyValue);
+        RSAPrivateKey privateKey = PemKeyParser.parsePrivateKey(privateKeyValue);
+
+        // Constrói o par de chaves no formato JWK
+        // A chave pública fica no JWKSet para eventual exposição via JWKS endpoint
+        // A chave privada é usada internamente para assinar — nunca exposta
         RSAKey rsaKey = new RSAKey.Builder(publicKey)
                 .privateKey(privateKey)
                 .build();
 
+        // ImmutableJWKSet encapsula o JWKSet em uma fonte imutável
+        // O tipo genérico <Never> indica que não há contexto de segurança adicional
         return new NimbusJwtEncoder(
                 new ImmutableJWKSet<>(new JWKSet(rsaKey))
         );

@@ -101,6 +101,7 @@ public class Usuario {
     // → não precisa de ordem (roles não têm ordenação natural)
     // → LinkedHashSet se quiséssemos manter ordem de inserção
     // → TreeSet se quiséssemos ordem alfabética
+    @Column(name = "role")
     private Set<Role> roles = new HashSet<>();
 
     // Preenchido automaticamente pelo Spring Data quando o registro é criado
