@@ -212,4 +212,13 @@ public class ClienteController {
 
         clienteService.removerEndereco(clienteId, enderecoId);
     }
+
+    @GetMapping("/usuario/{usuarioId}")
+    @PreAuthorize("hasRole('ROLE_ADMIN') or authentication.name == #usuarioId")
+    @Operation(summary = "Buscar cliente por usuarioId",
+            description = "Usado internamente pelo Conta Service")
+    public ClienteResponse buscarPorUsuarioId(
+            @PathVariable String usuarioId) {
+        return clienteService.buscarPorUsuarioId(usuarioId);
+    }
 }

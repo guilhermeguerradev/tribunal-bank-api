@@ -287,4 +287,12 @@ public class ClienteService {
                 })
                 .orElse(false);
     }
+
+    @Transactional(readOnly = true)
+    public ClienteResponse buscarPorUsuarioId(String usuarioId) {
+        Cliente cliente = clienteRepository
+                .findByUsuarioId(usuarioId)
+                .orElseThrow(() -> new ClienteNotFoundException(usuarioId));
+        return ClienteResponse.from(cliente);
+    }
 }
