@@ -1,4 +1,4 @@
-package com.tribunalbank.conta_service.entity;
+package com.tribunalbank.conta.entity;
 
 public enum TipoConta {
     CORRENTE,
